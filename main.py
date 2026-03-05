@@ -4,11 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 import sys
 import os
 import subprocess
+import uuid
 from io import StringIO
 
 app = FastAPI()
 
-# Enable CORS so your Flutter app can talk to Render
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,47 +34,51 @@ async def execute_code(request: CodeRequest):
         old_stdout = sys.stdout
         redirected_output = sys.stdout = StringIO()
         try:
-            # We use a clean dictionary for local_vars so users don't clash
-            local_vars = {} 
-            exec(request.user_code, {"__builtins__": __builtins__}, local_vars)
+            # FIX: Use a single dictionary for both globals and locals.
+            # This allows functions to access modules imported at the top level.
+            exec_globals = {"__builtins__": __builtins__}
+            exec(request.user_code, exec_globals, exec_globals)
             result = redirected_output.getvalue()
         except Exception as e:
             result = f"PYTHON ERROR: {str(e)}"
         finally:
-            sys.stdout = old_stdout # Reset stdout correctly
+            sys.stdout = old_stdout 
             
         return {"output": result.strip() if result else "Success (No output)"}
 
     # --- DART EXECUTION ENGINE ---
     elif lang == "dart":
-        # Create a temporary file for the user's Dart code
-        temp_file = "bridge_temp.dart"
+        # FIX: Generate a unique filename using UUID to prevent collisions
+        unique_id = uuid.uuid4().hex
+        temp_file = f"bridge_{unique_id}.dart"
+        
         with open(temp_file, "w") as f:
             f.write(request.user_code)
         
         try:
-            # We call the dart binary we downloaded in build.sh
-            # 'dart run' handles the compilation and execution in one go
             process = subprocess.run(
                 ["dart", "run", temp_file],
                 capture_output=True,
                 text=True,
-                timeout=10 # Prevents infinite loops from crashing your server
+                timeout=10 
             )
             
-            # Combine stdout (print statements) and stderr (errors)
-            output = process.stdout if process.returncode == 0 else process.stderr
-            result = output.strip()
+            # Combine stdout and stderr
+            if process.returncode == 0:
+                result = process.stdout
+            else:
+                result = f"DART ERROR:\n{process.stderr}"
+                
         except subprocess.TimeoutExpired:
             result = "DART ERROR: Execution timed out (Possible infinite loop)"
         except Exception as e:
             result = f"DART SYSTEM ERROR: {str(e)}"
         finally:
-            # Always clean up the temp file
+            # Clean up the specific unique temp file
             if os.path.exists(temp_file):
                 os.remove(temp_file)
                 
-        return {"output": result if result else "Success (No output)"}
+        return {"output": result.strip() if result else "Success (No output)"}
 
     return {"output": "ERROR: Unsupported Language"}
 
