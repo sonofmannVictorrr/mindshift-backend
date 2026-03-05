@@ -2,10 +2,13 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import sys
+import os
+import subprocess
 from io import StringIO
 
 app = FastAPI()
 
+# Enable CORS so your Flutter app can talk to Render
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,40 +20,63 @@ class CodeRequest(BaseModel):
     user_code: str
     language: str 
 
-# We will use a simple dictionary, but for V1 across Kenya, 
-# let's keep it simple. Note: State management for 100s of users 
-# usually requires a Database like Redis or Firebase.
-storage = {}
-
 @app.get("/")
 def health():
-    return {"status": "MindShift Neural Brain is Online"}
+    return {"status": "MindShift Neural Brain is Online and Multi-Language Ready"}
 
 @app.post("/execute")
 async def execute_code(request: CodeRequest):
-    if request.language.lower() == "python":
+    lang = request.language.lower()
+    
+    # --- PYTHON EXECUTION ENGINE ---
+    if lang == "python":
         old_stdout = sys.stdout
         redirected_output = sys.stdout = StringIO()
-        
         try:
-            # isolate user scope roughly
-            # To truly allow 10 people at once without mixing variables,
-            # we don't use a global storage in V1.
+            # We use a clean dictionary for local_vars so users don't clash
             local_vars = {} 
-            exec(request.user_code, {}, local_vars)
+            exec(request.user_code, {"__builtins__": __builtins__}, local_vars)
             result = redirected_output.getvalue()
         except Exception as e:
             result = f"PYTHON ERROR: {str(e)}"
         finally:
-            sys.stdout = sys.__stdout__
+            sys.stdout = old_stdout # Reset stdout correctly
             
         return {"output": result.strip() if result else "Success (No output)"}
 
-    elif request.language.lower() == "dart":
-        # Dart is tricky on Render. For V1, we return a "Simulation" 
-        # unless you use a Dockerfile (which is advanced).
-        return {"output": "DART MODULE: Online. (Cloud Dart requires Docker)"}
+    # --- DART EXECUTION ENGINE ---
+    elif lang == "dart":
+        # Create a temporary file for the user's Dart code
+        temp_file = "bridge_temp.dart"
+        with open(temp_file, "w") as f:
+            f.write(request.user_code)
+        
+        try:
+            # We call the dart binary we downloaded in build.sh
+            # 'dart run' handles the compilation and execution in one go
+            process = subprocess.run(
+                ["dart", "run", temp_file],
+                capture_output=True,
+                text=True,
+                timeout=10 # Prevents infinite loops from crashing your server
+            )
+            
+            # Combine stdout (print statements) and stderr (errors)
+            output = process.stdout if process.returncode == 0 else process.stderr
+            result = output.strip()
+        except subprocess.TimeoutExpired:
+            result = "DART ERROR: Execution timed out (Possible infinite loop)"
+        except Exception as e:
+            result = f"DART SYSTEM ERROR: {str(e)}"
+        finally:
+            # Always clean up the temp file
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+                
+        return {"output": result if result else "Success (No output)"}
+
+    return {"output": "ERROR: Unsupported Language"}
 
 @app.post("/reset")
 async def reset_memory():
-    return {"output": "SYSTEM REBOOTED: Cloud Memory Cleared."}
+    return {"output": "SYSTEM REBOOTED: Neural Bridge Refreshed."}
